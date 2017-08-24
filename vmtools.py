@@ -1,4 +1,7 @@
 import logging
+import ovirtsdk.api
+from ovirtsdk.xml import params
+from ovirtsdk.infrastructure import errors
 import time
 import sys
 import datetime
@@ -141,22 +144,155 @@ class VMTools:
         :param api: ovirtsdk api
         :param config: Configuration
         """
+	storage_domain = config.get_export_domain()
         vm_search_regexp = ("%s%s*" % (vm_name, config.get_vm_middle())).encode('ascii', 'ignore')
-        exported_vms = api.storagedomains.get(config.get_export_domain()).vms.list(name=vm_search_regexp)
-        for i in exported_vms:
-            vm_name_export = str(i.get_name())
-            datetimeStart = datetime.datetime.combine((datetime.date.today() - datetime.timedelta(config.get_backup_keep_count())), datetime.datetime.min.time())
-            timestampStart = time.mktime(datetimeStart.timetuple())
-            datetimeCreation = i.get_creation_time()
-            datetimeCreation = datetimeCreation.replace(hour=0, minute=0, second=0)
-            timestampCreation = time.mktime(datetimeCreation.timetuple())
-            if timestampCreation < timestampStart:
-                logger.info("Backup deletion started for backup: %s", vm_name_export)
-                if not config.get_dry_run():
-                    i.delete()
-                    while api.storagedomains.get(vm_name_export) is not None:
-                        logger.debug("Delete old backup (%s) in progress ..." % vm_name_export)
-                        time.sleep(config.get_timeout())
+	old_vms = []
+        for vm in api.storagedomains.get(storage_domain).vms.list(name=vm_search_regexp):
+	    old_vms.append(vm.get_name())
+        delete_vms = sorted(old_vms)[:-config.get_backup_keep_count()]
+	for vm_name in delete_vms:
+	    vm = api.storagedomains.get(storage_domain).vms.get(vm_name)
+            logger.info("Backup deletion started for backup: %s", vm.get_name())
+            if not config.get_dry_run():
+                vm.delete()
+                while api.storagedomains.get(storage_domain).vms.get(vm_name) is not None:
+                    logger.debug("Delete old backup (%s) in progress ..." % vm_name)
+                    time.sleep(config.get_timeout())
+
+    @staticmethod
+    def delete_old_templates(api, config, vm_name):
+        """
+        Delete old template backups 
+        :param api: ovirtsdk api
+        :param config: Configuration
+        """
+        vm_search_regexp = ("%s%s*" % (vm_name, config.get_vm_middle())).encode('ascii', 'ignore')
+	storage_domain = config.get_destination_domain()
+	old_templates = []
+        for t in api.templates.list(name=vm_search_regexp):
+	    old_templates.append(t.get_name())
+        delete_templates = sorted(old_templates)[:-config.get_backup_keep_count()]
+	for t_name in delete_templates:
+	    t = api.templates.get(t_name)
+            logger.info("Template deletion started for backup: %s", t_name)
+            if not config.get_dry_run():
+                t.delete()
+                while api.templates.get(vm_name) is not None:
+                    logger.debug("Delete old template (%s) in progress ..." % t_name)
+                    time.sleep(config.get_timeout())
+
+    @staticmethod
+    def create_snapshot(api, config, vm_from_list):
+        """
+        Create snapshot of given vm
+        :param api: ovirtsdk api
+        :param config: Configuration
+	:vm: VM to snapshot
+        """
+        vm = api.vms.get(vm_from_list)
+        logger.info("Snapshot creation started ...")
+        if not config.get_dry_run():
+            vm.snapshots.add(
+              params.Snapshot(
+                   description=config.get_snapshot_description(),
+                   vm=vm,
+                   persist_memorystate=config.get_persist_memorystate(),
+              )
+            )
+            VMTools.wait_for_snapshot_operation(vm, config, "creation")
+        logger.info("Snapshot created")
+
+    @staticmethod
+    def clone_snapshot(api, config, vm_from_list):
+        """
+        Clone snapshot into a new vm
+        :param api: ovirtsdk api
+        :param config: Configuration
+	:vm: VM to clone
+        """
+        vm_clone_name = vm_from_list + config.get_vm_middle() + config.get_vm_suffix()
+        vm = api.vms.get(vm_from_list)
+        snapshots = vm.snapshots.list(description=config.get_snapshot_description())
+        if not snapshots:
+            logger.error("!!! No snapshot found !!!")
+            has_errors = True
+        snapshot=snapshots[0]
+
+        # Find the storage domain where the disks should be created:
+        sd = api.storagedomains.get(name=config.get_destination_domain())
+
+        # Find the image identifiers of the disks of the snapshot, as
+        # we need them in order to explicitly indicate that we want
+        # them created in a different storage domain:
+        disk_ids = []
+        for current in snapshot.disks.list():
+            disk_ids.append(current.get_id())
+        # Prepare the list of disks for the operation to create the
+        # snapshot,explicitly indicating for each of them the storage
+        # domain where it should be created:
+        disk_list = []
+        for disk_id in disk_ids:
+            disk = params.Disk(
+                image_id=disk_id,
+                storage_domains=params.StorageDomains(
+                  storage_domain=[
+                    params.StorageDomain(
+                      id=sd.get_id(),
+                    ),
+                  ],
+                ),
+            )
+            disk_list.append(disk)
+
+        snapshot_param = params.Snapshot(id=snapshot.id)
+        snapshots_param = params.Snapshots(snapshot=[snapshot_param])
+        logger.info("Clone into VM (%s) started ..." % vm_clone_name)
+        if not config.get_dry_run():
+            api.vms.add(params.VM(
+                            name=vm_clone_name,
+                            memory=vm.get_memory(),
+                            cluster=api.clusters.get(config.get_cluster_name()),
+                            snapshots=snapshots_param,
+                            disks=params.Disks(
+                               disk=disk_list,
+                            )
+                        )
+            )
+            VMTools.wait_for_vm_operation(api, config, "Cloning", vm_from_list)
+        logger.info("Cloning finished")
+
+    @staticmethod
+    def backup_to_export(api, config, vm_from_list):
+        """
+        Export snaphot to en export domain
+        :param api: ovirtsdk api
+        :param config: Configuration
+	:vm_name: Name of VM to backup
+        """
+        vm_clone_name = vm_from_list + config.get_vm_middle() + config.get_vm_suffix()
+        vm_clone = api.vms.get(vm_clone_name)
+        logger.info("Export of VM (%s) started ..." % vm_clone_name)
+        if not config.get_dry_run():
+            vm_clone.export(params.Action(storage_domain=api.storagedomains.get(config.get_export_domain())))
+            VMTools.wait_for_vm_operation(api, config, "Exporting", vm_from_list)
+        logger.info("Exporting finished")
+
+    @staticmethod
+    def backup_to_template(api, config, vm_from_list):
+        """
+        Create template from cloned vm
+        :param api: ovirtsdk api
+        :param config: Configuration
+	:vm_name: Name of VM to backup
+        """
+        vm_clone_name = vm_from_list + config.get_vm_middle() + config.get_vm_suffix()
+        vm_clone = api.vms.get(vm_clone_name)
+        logger.info("Creation of template from VM (%s) started ..." % vm_clone_name)
+        if not config.get_dry_run():
+            api.templates.add(params.Template(name=vm_clone_name, vm=vm_clone))
+            VMTools.wait_for_vm_operation(api, config, "Creating template", vm_from_list)
+        logger.info("Template creation finished")
+
 
     @staticmethod
     def check_free_space(api, config, vm):
