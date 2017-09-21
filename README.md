@@ -1,3 +1,9 @@
+# THIS TOOL IS BASED ON THE SDK3 WHICH IS DEPRECATED AND WILL BE REMOVED IN THE NEXT VERSION 4.2
+# IT MAY OR MAY NOT GET UPDATED 
+## This may be used as an alternative https://github.com/openbacchus/bacchus
+
+
+
 # oVirtBackup
 
 This is a tool, written in Python, to make **online** fullbackup's of a VM which runs in an oVirt environment.
