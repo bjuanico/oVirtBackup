@@ -1,5 +1,7 @@
 # THIS TOOL IS BASED ON THE SDK3 WHICH IS DEPRECATED AND WILL BE REMOVED IN THE NEXT VERSION 4.2
 # IT MAY OR MAY NOT GET UPDATED 
+## EDIT: According to Ovirt Mailing List the SDK3 will still be available in 4.2, 
+## however it will still be removed later on an undefined date.
 ## This may be used as an alternative https://github.com/openbacchus/bacchus
 
 
